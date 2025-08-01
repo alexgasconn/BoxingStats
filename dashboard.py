@@ -125,7 +125,7 @@ def scrape_boxer_data(url):
 profile_data, df_fights = scrape_boxer_data(URL)
 
 if not profile_data:
-    st.error("Fallo crítico: El scraper fue bloqueado o no pudo encontrar los datos del perfil.")
+    st.error("Fallo crítico: Eliii scraper fue bloqueado o no pudo encontrar los datos del perfil.")
 else:
     st.title(f"🥊 Dashboard del Boxeador: {profile_data.get('name', 'N/A')}")
     st.markdown(f"Un análisis de la carrera profesional de **{profile_data.get('name', 'N/A')}**, extraído de [BoxRec]({URL}).")

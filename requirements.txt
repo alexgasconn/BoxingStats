@@ -4,4 +4,4 @@ requests
 beautifulsoup4
 plotly
 selenium
-cloudscrapper
+cloudscraper

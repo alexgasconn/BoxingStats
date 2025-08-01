@@ -17,48 +17,45 @@ st.set_page_config(
 
 URL = "https://boxrec.com/en/box-pro/125969"
 
-# --- Función de Scrapping con SELENIUM (Versión Final para Streamlit Cloud) ---
+# --- Función de Scrapping (Versión Final-Final para Streamlit Cloud) ---
 @st.cache_data(ttl=3600)
 def scrape_boxer_data(url):
     """
-    Usa Selenium con una configuración robusta y estándar para Streamlit Cloud.
+    Usa Selenium con Chromium, la configuración estándar y más robusta para Streamlit Cloud.
     """
-    st.info("Verificando entorno y preparando el navegador...")
+    st.info("Preparando el entorno del navegador (Chromium)...")
     st.write("Este proceso puede tardar hasta un minuto la primera vez que se ejecuta.")
 
-    # ### CAMBIO CLAVE: Configuración de Selenium simplificada y robusta ###
-    # Ya no usamos webdriver-manager. Selenium encontrará automáticamente
-    # el chromedriver que instalamos a través de packages.txt.
     options = Options()
-    options.add_argument("--headless")  # Ejecutar Chrome sin interfaz gráfica
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
 
     try:
-        # Inicializa el driver. No necesita 'service' ni 'ChromeDriverManager'.
+        # Selenium encontrará automáticamente el 'chromium-chromedriver' instalado
         driver = webdriver.Chrome(options=options)
-        st.write("Navegador iniciado. Accediendo a la URL...")
+        st.write("Navegador iniciado. Accediendo a BoxRec...")
     except Exception as e:
-        st.error(f"Error al inicializar el driver de Selenium: {e}")
-        st.error("Solución: Asegúrate de que el archivo 'packages.txt' existe y contiene 'google-chrome-stable' y 'chromedriver'.")
+        st.error(f"Error al inicializar el driver de Selenium/Chromium: {e}")
+        st.error("Solución: Asegúrate de que tu archivo 'packages.txt' contiene 'chromium-browser' y 'chromium-chromedriver'.")
         return None, None
 
     try:
         driver.get(url)
-        # Espera crucial para que la página se cargue completamente, incluyendo JavaScript
+        # Espera crucial para que la página renderice todo el contenido dinámico
         time.sleep(5)
         html = driver.page_source
         st.write("Página cargada y HTML capturado.")
         
     except Exception as e:
-        st.error(f"Error durante la navegación con Selenium: {e}")
+        st.error(f"Error durante la navegación: {e}")
         return None, None
     finally:
         driver.quit()
 
-    st.success("Scraper completado. Procesando datos...")
+    st.success("Scraper completado. Procesando los datos de tu bisabuelo...")
     soup = BeautifulSoup(html, 'html.parser')
 
     # --- 1. Extraer información del perfil ---
@@ -117,9 +114,9 @@ def scrape_boxer_data(url):
 profile_data, df_fights = scrape_boxer_data(URL)
 
 if not profile_data:
-    st.error("Fallo crítico: El scraper no pudo encontrar los datos del perfil. Por favor, revisa los logs.")
+    st.error("Fallo crítico: El scraper no pudo encontrar los datos del perfil. Revisa los logs de la app en Streamlit Cloud.")
 else:
-    # El resto del código del dashboard es el mismo
+    # --- Interfaz de Usuario ---
     st.title(f"🥊 Dashboard del Boxeador: {profile_data.get('name', 'N/A')}")
     st.markdown(f"Un análisis de la carrera profesional de **{profile_data.get('name', 'N/A')}**, extraído de [BoxRec]({URL}).")
     st.divider()
@@ -129,7 +126,7 @@ else:
         wins = int(profile_data.get('wins', '0'))
         losses = int(profile_data.get('losses', '0'))
         draws = int(profile_data.get('draws', '0'))
-        bouts = int(profile_data.get('bouts', '0', wins + losses + draws))
+        bouts = int(profile_data.get('bouts', wins + losses + draws))
         kos = int(profile_data.get('kos', '0'))
 
         col1, col2, col3, col4 = st.columns(4)

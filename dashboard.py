@@ -1,189 +1,311 @@
-# app.py
 import streamlit as st
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from bs4 import BeautifulSoup
 import pandas as pd
 import plotly.express as px
-import re
-import time
+import plotly.graph_objects as go
+from datetime import datetime
+import numpy as np
+from boxrec_scraper import BoxRecScraper  # Importa el scraper
 
-# --- Configuración de la página de Streamlit ---
+# Configuración de la página
 st.set_page_config(
-    page_title="Dashboard de Tomás Páez",
+    page_title="Estadísticas de Boxeo - Bisabuelo",
     page_icon="🥊",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-URL = "https://boxrec.com/en/box-pro/125969"
+# CSS personalizado
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 3rem;
+        color: #FF6B6B;
+        text-align: center;
+        margin-bottom: 2rem;
+        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+    }
+    .metric-card {
+        background: linear-gradient(45deg, #FF6B6B, #4ECDC4);
+        padding: 1rem;
+        border-radius: 10px;
+        color: white;
+        text-align: center;
+        margin: 0.5rem 0;
+    }
+    .stMetric {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 10px;
+        border: 1px solid #ddd;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# --- Función de Scrapping (Versión Final-Final para Streamlit Cloud) ---
-@st.cache_data(ttl=3600)
-def scrape_boxer_data(url):
-    """
-    Usa Selenium con Chromium, la configuración estándar y más robusta para Streamlit Cloud.
-    """
-    st.info("Preparando el entorno del navegador (Chromium)...")
-    st.write("Este proceso puede tardar hasta un minuto la primera vez que se ejecuta.")
-
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-
+@st.cache_data
+def load_data(url):
+    """Carga los datos del boxeador usando el scraper"""
     try:
-        # Selenium encontrará automáticamente el 'chromium-chromedriver' instalado
-        driver = webdriver.Chrome(options=options)
-        st.write("Navegador iniciado. Accediendo a BoxRec...")
+        scraper = BoxRecScraper()
+        career_df, boxer_info = scraper.scrape_boxer_career(url), scraper.get_boxer_info(url)
+        return career_df, boxer_info
     except Exception as e:
-        st.error(f"Error al inicializar el driver de Selenium/Chromium: {e}")
-        st.error("Solución: Asegúrate de que tu archivo 'packages.txt' contiene 'chromium-browser' y 'chromium-chromedriver'.")
-        return None, None
+        st.error(f"Error cargando datos: {e}")
+        return None, {}
 
-    try:
-        driver.get(url)
-        # Espera crucial para que la página renderice todo el contenido dinámico
-        time.sleep(5)
-        html = driver.page_source
-        st.write("Página cargada y HTML capturado.")
-        
-    except Exception as e:
-        st.error(f"Error durante la navegación: {e}")
-        return None, None
-    finally:
-        driver.quit()
-
-    st.success("Scraper completado. Procesando los datos de tu bisabuelo...")
-    soup = BeautifulSoup(html, 'html.parser')
-
-    # --- 1. Extraer información del perfil ---
-    profile_data = {}
-    name_tag = soup.find('h1')
-    profile_data['name'] = name_tag.text.strip() if name_tag else "Nombre no encontrado"
+def calculate_stats(df):
+    """Calcula estadísticas del boxeador"""
+    if df is None or df.empty:
+        return {}
     
-    profile_table = soup.find('table', class_='profileTable')
-    if profile_table:
-        for row in profile_table.find_all('tr'):
-            cells = row.find_all('td')
-            if len(cells) == 2:
-                key = cells[0].text.strip().lower().replace(':', '')
-                value = cells[1].text.strip()
-                profile_data[key] = value
+    stats = {}
+    
+    # Estadísticas básicas
+    stats['total_fights'] = len(df)
+    
+    if 'Win' in df.columns:
+        stats['wins'] = df['Win'].sum()
+        stats['losses'] = df['Loss'].sum() if 'Loss' in df.columns else 0
+        stats['draws'] = df['Draw'].sum() if 'Draw' in df.columns else 0
+        stats['win_percentage'] = (stats['wins'] / stats['total_fights'] * 100) if stats['total_fights'] > 0 else 0
+    
+    if 'KO' in df.columns:
+        stats['kos'] = df['KO'].sum()
+        stats['ko_percentage'] = (stats['kos'] / stats['wins'] * 100) if stats['wins'] > 0 else 0
+    
+    # Duración de carrera
+    if 'Date' in df.columns:
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        valid_dates = df['Date'].dropna()
+        if not valid_dates.empty:
+            stats['career_start'] = valid_dates.min()
+            stats['career_end'] = valid_dates.max()
+            stats['career_length'] = (stats['career_end'] - stats['career_start']).days / 365.25
+    
+    return stats
 
-    # --- 2. Extraer la tabla de combates ---
-    fight_table = soup.find('table', class_='dataTable')
-    if not fight_table:
-        return profile_data, None
+def create_fight_timeline(df):
+    """Crea un timeline de las peleas"""
+    if df is None or df.empty or 'Date' not in df.columns:
+        return None
+    
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df_valid = df.dropna(subset=['Date']).copy()
+    
+    if df_valid.empty:
+        return None
+    
+    # Añadir colores basados en resultados
+    colors = []
+    for _, row in df_valid.iterrows():
+        if 'Win' in row and row['Win']:
+            colors.append('green')
+        elif 'Loss' in row and row['Loss']:
+            colors.append('red')
+        else:
+            colors.append('blue')
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=df_valid['Date'],
+        y=range(len(df_valid)),
+        mode='markers+lines',
+        marker=dict(
+            color=colors,
+            size=10,
+            line=dict(color='black', width=1)
+        ),
+        text=df_valid['Opponent'] if 'Opponent' in df_valid.columns else '',
+        hovertemplate='<b>%{text}</b><br>Fecha: %{x}<br>Pelea #%{y}<extra></extra>',
+        name='Peleas'
+    ))
+    
+    fig.update_layout(
+        title="Timeline de la Carrera",
+        xaxis_title="Fecha",
+        yaxis_title="Número de Pelea",
+        hovermode='closest',
+        height=400
+    )
+    
+    return fig
 
-    fights_data = []
-    for tbody in fight_table.find_all('tbody'):
-        row = tbody.find('tr')
-        if not row or 'SR' in row.get('class', []): continue
+def create_results_pie_chart(stats):
+    """Crea un gráfico de pastel con los resultados"""
+    if not stats or 'wins' not in stats:
+        return None
+    
+    labels = ['Victorias', 'Derrotas', 'Empates']
+    values = [stats.get('wins', 0), stats.get('losses', 0), stats.get('draws', 0)]
+    colors = ['#4CAF50', '#F44336', '#FF9800']
+    
+    fig = go.Figure(data=[go.Pie(
+        labels=labels,
+        values=values,
+        marker_colors=colors,
+        textinfo='label+percent+value',
+        hovertemplate='<b>%{label}</b><br>%{value} peleas<br>%{percent}<extra></extra>'
+    )])
+    
+    fig.update_layout(
+        title="Distribución de Resultados",
+        height=400
+    )
+    
+    return fig
+
+def main():
+    st.markdown("<h1 class='main-header'>🥊 Estadísticas de Boxeo del Bisabuelo</h1>", unsafe_allow_html=True)
+    
+    # Sidebar para configuración
+    st.sidebar.header("⚙️ Configuración")
+    
+    # URL del boxeador
+    default_url = "https://boxrec.com/en/box-pro/125969"
+    boxer_url = st.sidebar.text_input("URL del BoxRec:", value=default_url)
+    
+    if st.sidebar.button("🔄 Actualizar Datos"):
+        st.cache_data.clear()
+    
+    # Cargar datos
+    if boxer_url:
+        with st.spinner("Cargando datos del boxeador..."):
+            career_df, boxer_info = load_data(boxer_url)
         
-        cols = row.find_all('td')
-        if len(cols) >= 9:
-            date_str = re.sub(r'\s+', ' ', cols[0].text).strip()
-            opponent_tag = cols[2].find('a', class_='personLink')
-            opponent_name = re.sub(r'\s+', ' ', opponent_tag.get_text(separator=' ')).strip() if opponent_tag else 'N/A'
-            wld_text = re.sub(r'\s+', ' ', cols[3].text).strip()
-            location_text = re.sub(r'\s+', ' ', cols[5].text).strip()
-            result_div = cols[6].find('div', class_='boutResult')
-            result = result_div.text.strip() if result_div else 'N/A'
+        if career_df is not None and not career_df.empty:
+            # Calcular estadísticas
+            stats = calculate_stats(career_df)
             
-            fights_data.append({
-                'date_str': date_str, 'opponent': opponent_name,
-                'opponent_w-l-d': wld_text, 'location': location_text, 'result': result
-            })
-
-    if not fights_data:
-        return profile_data, None
-
-    df_fights = pd.DataFrame(fights_data)
-
-    # --- 3. Limpieza de datos ---
-    df_fights['date'] = pd.to_datetime('01 ' + df_fights['date_str'], format='%d %b %y', errors='coerce')
-    df_fights.dropna(subset=['date'], inplace=True)
-    df_fights['Resultado'] = df_fights['result'].map({'W': 'Victoria', 'L': 'Derrota', 'D': 'Empate'}).fillna('Otro')
-    df_fights['Año'] = df_fights['date'].dt.year.astype(int)
-    
-    return profile_data, df_fights
-
-# --- Inicia la construcción de la App ---
-profile_data, df_fights = scrape_boxer_data(URL)
-
-if not profile_data:
-    st.error("Fallo crítico: El scraper no pudo encontrar los datos del perfil. Revisa los logs de la app en Streamlit Cloud.")
-else:
-    # --- Interfaz de Usuario ---
-    st.title(f"🥊 Dashboard del Boxeador: {profile_data.get('name', 'N/A')}")
-    st.markdown(f"Un análisis de la carrera profesional de **{profile_data.get('name', 'N/A')}**, extraído de [BoxRec]({URL}).")
-    st.divider()
-
-    st.header("Resumen del Perfil")
-    try:
-        wins = int(profile_data.get('wins', '0'))
-        losses = int(profile_data.get('losses', '0'))
-        draws = int(profile_data.get('draws', '0'))
-        bouts = int(profile_data.get('bouts', wins + losses + draws))
-        kos = int(profile_data.get('kos', '0'))
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total de Combates", bouts)
-        if bouts > 0:
-            col2.metric("Victorias", wins, f"{round((wins/bouts)*100, 1)}%")
-            col3.metric("Derrotas", losses, f"-{round((losses/bouts)*100, 1)}%")
-        if wins > 0 and kos > 0:
-            col4.metric("Victorias por KO", kos, f"{round((kos/wins)*100, 1)}% de las victorias")
-
-    except (ValueError, ZeroDivisionError):
-        st.warning("No se pudieron calcular todas las métricas del perfil.")
-
-    st.subheader("Datos Biográficos")
-    bio_col1, bio_col2 = st.columns(2)
-    with bio_col1:
-        st.write(f"**Alias:** {profile_data.get('alias', 'N/A')}")
-        st.write(f"**Nacionalidad:** {profile_data.get('nationality', 'N/A')}")
-        st.write(f"**Postura:** {profile_data.get('stance', 'N/A')}")
-    with bio_col2:
-        st.write(f"**Nacimiento:** {profile_data.get('born', 'N/A')}")
-        st.write(f"**Carrera:** {profile_data.get('career', 'N/A')}")
-        st.write(f"**Rounds totales:** {profile_data.get('rounds', 'N/A')}")
-    
-    st.divider()
-    
-    if df_fights is not None and not df_fights.empty:
-        st.header("Análisis de la Carrera")
-        viz1, viz2 = st.columns(2)
-        
-        with viz1:
-            st.subheader("Distribución de Resultados")
-            outcome_counts = df_fights['Resultado'].value_counts()
-            fig_pie = px.pie(
-                outcome_counts, values=outcome_counts.values, names=outcome_counts.index,
-                title="Resumen de Victorias, Derrotas y Empates",
-                color_discrete_map={'Victoria': '#2ca02c', 'Derrota': '#d62728', 'Empate': '#ff7f0e', 'Otro': '#7f7f7f'}
+            # Información del boxeador
+            st.header("📋 Información del Boxeador")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.info(f"**Nombre:** {boxer_info.get('name', 'No disponible')}")
+            with col2:
+                st.info(f"**Récord:** {boxer_info.get('record', 'No disponible')}")
+            
+            # Métricas principales
+            st.header("📊 Estadísticas Principales")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Total de Peleas", stats.get('total_fights', 0))
+            with col2:
+                st.metric("Victorias", stats.get('wins', 0))
+            with col3:
+                st.metric("Derrotas", stats.get('losses', 0))
+            with col4:
+                st.metric("% de Victoria", f"{stats.get('win_percentage', 0):.1f}%")
+            
+            col5, col6, col7, col8 = st.columns(4)
+            
+            with col5:
+                st.metric("KOs", stats.get('kos', 0))
+            with col6:
+                st.metric("% KO", f"{stats.get('ko_percentage', 0):.1f}%")
+            with col7:
+                if 'career_length' in stats:
+                    st.metric("Años Activo", f"{stats['career_length']:.1f}")
+            with col8:
+                st.metric("Empates", stats.get('draws', 0))
+            
+            # Gráficos
+            st.header("📈 Visualizaciones")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Gráfico de pastel
+                pie_fig = create_results_pie_chart(stats)
+                if pie_fig:
+                    st.plotly_chart(pie_fig, use_container_width=True)
+            
+            with col2:
+                # Timeline de peleas
+                timeline_fig = create_fight_timeline(career_df)
+                if timeline_fig:
+                    st.plotly_chart(timeline_fig, use_container_width=True)
+            
+            # Tabla de datos
+            st.header("📋 Historial de Peleas")
+            
+            # Filtros
+            col1, col2 = st.columns(2)
+            with col1:
+                show_all = st.checkbox("Mostrar todas las peleas", value=True)
+            with col2:
+                if 'Result' in career_df.columns:
+                    result_filter = st.selectbox(
+                        "Filtrar por resultado:",
+                        ['Todos'] + list(career_df['Result'].unique())
+                    )
+                else:
+                    result_filter = 'Todos'
+            
+            # Aplicar filtros
+            filtered_df = career_df.copy()
+            if result_filter != 'Todos' and 'Result' in career_df.columns:
+                filtered_df = filtered_df[filtered_df['Result'] == result_filter]
+            
+            if not show_all:
+                filtered_df = filtered_df.head(10)
+            
+            st.dataframe(filtered_df, use_container_width=True)
+            
+            # Descargar datos
+            st.header("💾 Descargar Datos")
+            csv = career_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Descargar CSV",
+                data=csv,
+                file_name=f"carrera_boxeo_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
             )
-            st.plotly_chart(fig_pie, use_container_width=True)
+            
+        else:
+            st.error("No se pudieron cargar los datos. Verifica la URL y que la página sea accesible.")
+            
+            # Opción para cargar archivo CSV manualmente
+            st.header("📁 Cargar Datos Manualmente")
+            uploaded_file = st.file_uploader("Sube un archivo CSV con los datos de las peleas", type="csv")
+            
+            if uploaded_file is not None:
+                try:
+                    career_df = pd.read_csv(uploaded_file)
+                    st.success("Archivo cargado exitosamente!")
+                    st.dataframe(career_df.head())
+                    
+                    # Procesar datos cargados manualmente
+                    stats = calculate_stats(career_df)
+                    
+                    # Mostrar métricas básicas
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Total de Peleas", stats.get('total_fights', 0))
+                    with col2:
+                        st.metric("Victorias", stats.get('wins', 0))
+                    with col3:
+                        st.metric("% Victoria", f"{stats.get('win_percentage', 0):.1f}%")
+                        
+                except Exception as e:
+                    st.error(f"Error procesando el archivo: {e}")
+    
+    # Información adicional en sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### ℹ️ Información")
+    st.sidebar.markdown("""
+    Este dashboard muestra las estadísticas de boxeo extraídas de BoxRec.
+    
+    **Características:**
+    - Timeline de peleas
+    - Estadísticas de victoria/derrota
+    - Análisis de KOs
+    - Descarga de datos
+    """)
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("*Hecho con ❤️ para preservar la historia familiar*")
 
-        with viz2:
-            st.subheader("Actividad por Año")
-            fights_per_year = df_fights['Año'].value_counts().sort_index()
-            fig_bar = px.bar(
-                fights_per_year, x=fights_per_year.index, y=fights_per_year.values,
-                title="Número de Combates por Año", labels={'x': 'Año', 'y': 'Número de Combates'}
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-        st.divider()
-
-        st.header("Registro Completo de Combates")
-        display_df = df_fights.sort_values(by='date', ascending=False)
-        display_df['date'] = display_df['date'].dt.strftime('%d-%m-%Y')
-        display_df_final = display_df[['date', 'opponent', 'opponent_w-l-d', 'Resultado', 'location']]
-        display_df_final.columns = ['Fecha', 'Oponente', 'Récord Oponente', 'Resultado', 'Lugar']
-        
-        st.dataframe(display_df_final, use_container_width=True, height=500, hide_index=True)
-    else:
-        st.warning("No se pudo cargar o procesar la tabla de combates.")
+if __name__ == "__main__":
+    main()

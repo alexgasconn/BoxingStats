@@ -2,14 +2,11 @@
 import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import pandas as pd
 import plotly.express as px
 import re
 import time
-import os
 
 # --- Configuración de la página de Streamlit ---
 st.set_page_config(
@@ -20,54 +17,51 @@ st.set_page_config(
 
 URL = "https://boxrec.com/en/box-pro/125969"
 
-# --- Función de Scrapping con SELENIUM (La solución definitiva) ---
-@st.cache_data(ttl=3600) # Cacheamos el resultado por 1 hora para no ejecutar Selenium constantemente
-def scrape_boxer_data_with_selenium(url):
+# --- Función de Scrapping con SELENIUM (Versión Final para Streamlit Cloud) ---
+@st.cache_data(ttl=3600)
+def scrape_boxer_data(url):
     """
-    Usa Selenium para controlar un navegador Chrome real y obtener el HTML
-    de la página, evitando así los bloqueos anti-scraping.
+    Usa Selenium con una configuración robusta y estándar para Streamlit Cloud.
     """
-    st.info("Iniciando el scraper con Selenium... Esto puede tardar unos segundos la primera vez.")
-    
-    # --- Configuración de Selenium para Streamlit Cloud ---
+    st.info("Verificando entorno y preparando el navegador...")
+    st.write("Este proceso puede tardar hasta un minuto la primera vez que se ejecuta.")
+
+    # ### CAMBIO CLAVE: Configuración de Selenium simplificada y robusta ###
+    # Ya no usamos webdriver-manager. Selenium encontrará automáticamente
+    # el chromedriver que instalamos a través de packages.txt.
     options = Options()
-    options.add_argument("--disable-gpu")
-    options.add_argument("--headless")
+    options.add_argument("--headless")  # Ejecutar Chrome sin interfaz gráfica
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("window-size=1920x1080")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
 
-    # Inicializa el driver de Chrome
-    # Esto funcionará tanto en local como en Streamlit Cloud gracias a la configuración
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        # Inicializa el driver. No necesita 'service' ni 'ChromeDriverManager'.
+        driver = webdriver.Chrome(options=options)
+        st.write("Navegador iniciado. Accediendo a la URL...")
     except Exception as e:
         st.error(f"Error al inicializar el driver de Selenium: {e}")
-        st.error("Asegúrate de que el archivo 'packages.txt' existe y contiene 'google-chrome-stable' y 'chromedriver'.")
+        st.error("Solución: Asegúrate de que el archivo 'packages.txt' existe y contiene 'google-chrome-stable' y 'chromedriver'.")
         return None, None
 
     try:
         driver.get(url)
-        # Espera crucial para que todo el JavaScript se cargue
-        time.sleep(5) 
-        
-        # Obtenemos el HTML renderizado
+        # Espera crucial para que la página se cargue completamente, incluyendo JavaScript
+        time.sleep(5)
         html = driver.page_source
+        st.write("Página cargada y HTML capturado.")
         
     except Exception as e:
         st.error(f"Error durante la navegación con Selenium: {e}")
-        driver.quit()
         return None, None
     finally:
-        # Asegurarnos de cerrar el navegador siempre
         driver.quit()
 
-    st.success("Scraper ha obtenido los datos con éxito. Procesando...")
-
+    st.success("Scraper completado. Procesando datos...")
     soup = BeautifulSoup(html, 'html.parser')
 
-    # --- 1. Extraer información del perfil (sin cambios) ---
+    # --- 1. Extraer información del perfil ---
     profile_data = {}
     name_tag = soup.find('h1')
     profile_data['name'] = name_tag.text.strip() if name_tag else "Nombre no encontrado"
@@ -81,7 +75,7 @@ def scrape_boxer_data_with_selenium(url):
                 value = cells[1].text.strip()
                 profile_data[key] = value
 
-    # --- 2. Extraer la tabla de combates (sin cambios en la lógica de parseo) ---
+    # --- 2. Extraer la tabla de combates ---
     fight_table = soup.find('table', class_='dataTable')
     if not fight_table:
         return profile_data, None
@@ -111,7 +105,7 @@ def scrape_boxer_data_with_selenium(url):
 
     df_fights = pd.DataFrame(fights_data)
 
-    # --- 3. Limpieza de datos (sin cambios) ---
+    # --- 3. Limpieza de datos ---
     df_fights['date'] = pd.to_datetime('01 ' + df_fights['date_str'], format='%d %b %y', errors='coerce')
     df_fights.dropna(subset=['date'], inplace=True)
     df_fights['Resultado'] = df_fights['result'].map({'W': 'Victoria', 'L': 'Derrota', 'D': 'Empate'}).fillna('Otro')
@@ -120,10 +114,10 @@ def scrape_boxer_data_with_selenium(url):
     return profile_data, df_fights
 
 # --- Inicia la construcción de la App ---
-profile_data, df_fights = scrape_boxer_data_with_selenium(URL)
+profile_data, df_fights = scrape_boxer_data(URL)
 
 if not profile_data:
-    st.error("Fallo crítico: El scraper fue bloqueado o no pudo encontrar los datos del perfil. Por favor, revisa los logs.")
+    st.error("Fallo crítico: El scraper no pudo encontrar los datos del perfil. Por favor, revisa los logs.")
 else:
     # El resto del código del dashboard es el mismo
     st.title(f"🥊 Dashboard del Boxeador: {profile_data.get('name', 'N/A')}")
@@ -188,10 +182,11 @@ else:
         st.divider()
 
         st.header("Registro Completo de Combates")
-        display_df = df_fights[['date', 'opponent', 'opponent_w-l-d', 'Resultado', 'location']]
-        display_df.columns = ['Fecha', 'Oponente', 'Récord Oponente', 'Resultado', 'Lugar']
-        display_df['Fecha'] = display_df['Fecha'].dt.strftime('%d-%m-%Y')
+        display_df = df_fights.sort_values(by='date', ascending=False)
+        display_df['date'] = display_df['date'].dt.strftime('%d-%m-%Y')
+        display_df_final = display_df[['date', 'opponent', 'opponent_w-l-d', 'Resultado', 'location']]
+        display_df_final.columns = ['Fecha', 'Oponente', 'Récord Oponente', 'Resultado', 'Lugar']
         
-        st.dataframe(display_df.sort_values(by='Fecha', ascending=False, key=lambda col: pd.to_datetime(col, format='%d-%m-%Y')), use_container_width=True, height=500)
+        st.dataframe(display_df_final, use_container_width=True, height=500, hide_index=True)
     else:
         st.warning("No se pudo cargar o procesar la tabla de combates.")

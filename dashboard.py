@@ -1,10 +1,11 @@
 # app.py
 import streamlit as st
 import requests
-import cloudscraper  # ### CAMBIO 1: Importamos la nueva librería ###
+import cloudscraper
 from bs4 import BeautifulSoup
 import pandas as pd
 import plotly.express as px
+import re
 
 # --- Configuración de la página de Streamlit ---
 st.set_page_config(
@@ -13,35 +14,28 @@ st.set_page_config(
     layout="wide"
 )
 
-# La URL del perfil de tu bisabuelo en BoxRec
 URL = "https://boxrec.com/en/box-pro/125969"
 
-# --- Función de Scrapping (USANDO CLOUDSCRAPER) ---
+# --- Función de Scrapping (Versión Final y Robusta) ---
+@st.cache_data(ttl=3600) # Cache por 1 hora
 def scrape_boxer_data(url):
     """
-    Extrae la información de perfil y la tabla de combates de una URL de BoxRec,
-    usando cloudscraper para evitar el bloqueo 403.
+    Extrae información de perfil y la tabla de combates usando cloudscraper
+    y un análisis preciso de la estructura HTML proporcionada.
     """
-    # ### CAMBIO 2: Creamos una instancia de cloudscraper ###
     scraper = cloudscraper.create_scraper(
-        browser={
-            'browser': 'chrome',
-            'platform': 'windows',
-            'mobile': False
-        }
+        browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
     )
 
     try:
-        # ### CAMBIO 3: Usamos scraper.get() en lugar de requests.get() ###
         response = scraper.get(url)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        st.error(f"Error al obtener la página: {e}")
+        st.error(f"Error de conexión al obtener la página: {e}")
         return None, None
     except Exception as e:
-        # Cloudscraper puede lanzar otros errores si no puede resolver el desafío
         st.error(f"Error de Cloudscraper: {e}")
-        st.info("Esto puede ocurrir si BoxRec ha actualizado su sistema de seguridad. Intenta recargar la página en unos minutos.")
+        st.info("El scraper fue bloqueado por la seguridad de la web. Esto a veces es temporal. Intenta recargar la página en unos minutos.")
         return None, None
 
     soup = BeautifulSoup(response.content, 'html.parser')
@@ -53,77 +47,85 @@ def scrape_boxer_data(url):
     
     profile_table = soup.find('table', class_='profileTable')
     if profile_table:
-        rows = profile_table.find_all('tr')
-        for row in rows:
+        for row in profile_table.find_all('tr'):
             cells = row.find_all('td')
             if len(cells) == 2:
                 key = cells[0].text.strip().lower().replace(':', '')
                 value = cells[1].text.strip()
                 profile_data[key] = value
 
-    # --- 2. Extraer la tabla de combates ---
+    # --- 2. Extraer la tabla de combates (Análisis Preciso) ---
     fight_table = soup.find('table', class_='dataTable')
     if not fight_table:
-        st.warning("No se encontró la tabla de combates. La estructura de la página puede haber cambiado.")
         return profile_data, None
 
-    rows_data = []
-    for row in fight_table.find_all('tr'):
+    fights_data = []
+    # Iteramos sobre cada <tbody>, ya que cada uno contiene un combate
+    for tbody in fight_table.find_all('tbody'):
+        # Buscamos la fila (tr) dentro del tbody
+        row = tbody.find('tr')
+        if not row:
+            continue
+
+        # Nos aseguramos de que no sea una fila de publicidad o vacía
+        if 'midAdvert' in row.get('class', []):
+            continue
+
         cols = row.find_all('td')
-        if len(cols) > 8:
-            opponent_cell = cols[2]
-            opponent_name = opponent_cell.find('a').text.strip() if opponent_cell.find('a') else ''
+        
+        # Una fila de combate válida tiene al menos 9 celdas
+        if len(cols) >= 9:
+            # Limpiamos la fecha de espacios y saltos de línea
+            date_str = re.sub(r'\s+', ' ', cols[0].text).strip()
             
-            location_cell = cols[5]
-            location = location_cell.text.strip()
-
-            result_cell = cols[6]
-            result_div = result_cell.find('div', class_='boutResult')
-            result = result_div.text.strip() if result_div else ''
-
-            row_dict = {
-                'date': cols[0].text.strip().replace('\n', '').replace(' ', ''),
+            # Limpiamos el nombre del oponente
+            opponent_tag = cols[2].find('a', class_='personLink')
+            opponent_name = re.sub(r'\s+', ' ', opponent_tag.get_text(separator=' ')).strip() if opponent_tag else 'N/A'
+            
+            # Obtenemos el record W-L-D
+            wld_text = re.sub(r'\s+', ' ', cols[3].text).strip()
+            
+            # Obtenemos la localización
+            location_text = re.sub(r'\s+', ' ', cols[5].text).strip()
+            
+            # Obtenemos el resultado
+            result_div = cols[6].find('div', class_='boutResult')
+            result = result_div.text.strip() if result_div else 'N/A'
+            
+            fights_data.append({
+                'date_str': date_str,
                 'opponent': opponent_name,
-                'opponent_w-l-d': cols[3].text.strip().replace('\n', ' ').replace(u'\xa0', ' '),
-                'location': location,
-                'result': result,
-            }
-            rows_data.append(row_dict)
+                'opponent_w-l-d': wld_text,
+                'location': location_text,
+                'result': result
+            })
 
-    if not rows_data:
-        st.warning("No se pudieron extraer datos de las filas de combates.")
+    if not fights_data:
         return profile_data, None
 
-    df_fights = pd.DataFrame(rows_data)
+    df_fights = pd.DataFrame(fights_data)
+
+    # --- 3. Limpieza y Procesamiento de Datos del DataFrame ---
+    # Convertir fechas aproximadas ('May 48') a fechas reales ('1948-05-01')
+    try:
+        # Añadimos un día '01' para que pandas pueda interpretarlo como fecha
+        df_fights['date'] = pd.to_datetime('01 ' + df_fights['date_str'], format='%d %b %y', errors='coerce')
+    except Exception:
+        # Si falla el formato anterior, intentamos sin el día
+        df_fights['date'] = pd.to_datetime(df_fights['date_str'], format='%b %y', errors='coerce')
+
+    df_fights = df_fights.dropna(subset=['date']) # Eliminar filas donde la fecha no se pudo parsear
+    df_fights['Resultado'] = df_fights['result'].map({'W': 'Victoria', 'L': 'Derrota', 'D': 'Empate'}).fillna('Otro')
+    df_fights['Año'] = df_fights['date'].dt.year
+    df_fights['Año'] = df_fights['Año'].astype(int)
     
     return profile_data, df_fights
 
-# --- Función para cargar y cachear los datos ---
-@st.cache_data(ttl=3600)
-def load_data():
-    profile, df_fights = scrape_boxer_data(URL)
-    
-    if df_fights is None or df_fights.empty:
-        return profile, None
-
-    # --- Limpieza y procesamiento de datos ---
-    # Intenta convertir las fechas aproximadas ('May48', 'Jul47') a fechas reales
-    # Creamos una fecha para el primer día del mes/año extraído
-    df_fights['date_parsed'] = pd.to_datetime(df_fights['date'], format='%b%y', errors='coerce')
-    
-    df_fights['Resultado'] = df_fights['result'].map({'W': 'Victoria', 'L': 'Derrota', 'D': 'Empate'}).fillna('Otro')
-    df_fights = df_fights.dropna(subset=['date_parsed'])
-    df_fights['Año'] = df_fights['date_parsed'].dt.year
-    df_fights['Año'] = df_fights['Año'].astype(int)
-
-    return profile, df_fights
-
-
 # --- Inicia la construcción de la App ---
-profile_data, df_fights = load_data()
+profile_data, df_fights = scrape_boxer_data(URL)
 
 if not profile_data:
-    st.error("Fallo crítico: No se pudo cargar la información del perfil del boxeador.")
+    st.error("Fallo crítico: El scraper fue bloqueado o no pudo encontrar los datos del perfil.")
 else:
     st.title(f"🥊 Dashboard del Boxeador: {profile_data.get('name', 'N/A')}")
     st.markdown(f"Un análisis de la carrera profesional de **{profile_data.get('name', 'N/A')}**, extraído de [BoxRec]({URL}).")
@@ -148,7 +150,6 @@ else:
     except (ValueError, ZeroDivisionError):
         st.warning("No se pudieron calcular todas las métricas del perfil.")
 
-    # ... el resto del código del dashboard sigue igual ...
     st.subheader("Datos Biográficos")
     bio_col1, bio_col2 = st.columns(2)
     with bio_col1:
@@ -193,12 +194,12 @@ else:
         st.divider()
 
         st.header("Registro Completo de Combates")
-        st.markdown("Puedes ordenar la tabla haciendo clic en las cabeceras de las columnas.")
+        st.markdown("Puedes ordenar la tabla y filtrar los datos. Los datos se muestran del más reciente al más antiguo.")
         
-        display_df = df_fights[['date_parsed', 'opponent', 'Resultado', 'location']]
-        display_df.columns = ['Fecha', 'Oponente', 'Resultado', 'Lugar']
-        display_df['Fecha'] = display_df['Fecha'].dt.strftime('%Y-%m-%d')
+        display_df = df_fights[['date', 'opponent', 'opponent_w-l-d', 'Resultado', 'location']]
+        display_df.columns = ['Fecha', 'Oponente', 'Récord Oponente', 'Resultado', 'Lugar']
+        display_df['Fecha'] = display_df['Fecha'].dt.strftime('%d-%m-%Y')
         
         st.dataframe(display_df.sort_values(by='Fecha', ascending=False), use_container_width=True, height=500)
     else:
-        st.warning("No se pudo cargar o procesar la tabla de combates. La estructura de BoxRec puede haber cambiado o el scraper fue bloqueado.")
+        st.warning("No se pudo cargar o procesar la tabla de combates. Esto puede deberse a que no hay combates registrados o a un cambio en la estructura de la web.")
